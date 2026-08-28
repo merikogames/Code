@@ -5,7 +5,7 @@ import path from 'path';
 import config from './config.js';
 
 // ============================================================
-// Packet Types (هماهنگ کامل با کلاینت گودوت)
+// Packet Types
 // ============================================================
 const PacketType = {
     SET_ID: 'set_id',
@@ -46,19 +46,21 @@ let bans = JSON.parse(fs.readFileSync(banFilePath, 'utf8'));
 // کلاس Vehicle
 // ============================================================
 class Vehicle {
-    constructor(id, type, position, rotation, ownerId) {
+    constructor(id, ownerId, position, rotation, type, car_db_id) {
         this.id = id;
-        this.type = type;
-        this.position = position;
-        this.rotation = rotation;
         this.ownerId = ownerId;
-        this.occupants = new Map();
+        this.position = position || { x: 0, y: 0, z: 0 };
+        this.rotation = rotation || 0;
+        this.type = type || 'car';
+        this.car_db_id = car_db_id || null;
+        this.steering = 0;
         this.speed = 0;
         this.fuel = 100;
+        this.occupants = new Map();
         this.lastUpdate = Date.now();
     }
 
-    addOccupant(playerId, seatIndex) {
+    addOccupant(playerId, seatIndex = 0) {
         this.occupants.set(playerId, seatIndex);
     }
 
@@ -66,12 +68,28 @@ class Vehicle {
         this.occupants.delete(playerId);
     }
 
-    update(position, rotation, speed, fuel) {
-        this.position = position;
-        this.rotation = rotation;
-        this.speed = speed;
-        this.fuel = Math.max(0, Math.min(100, fuel));
+    update(position, rotation, speed, fuel, steering) {
+        if (position) this.position = position;
+        if (rotation !== undefined) this.rotation = rotation;
+        if (speed !== undefined) this.speed = speed;
+        if (fuel !== undefined) this.fuel = Math.max(0, Math.min(100, fuel));
+        if (steering !== undefined) this.steering = steering;
         this.lastUpdate = Date.now();
+    }
+
+    getState() {
+        return {
+            id: this.id,
+            ownerId: this.ownerId,
+            type: this.type,
+            car_db_id: this.car_db_id,
+            position: this.position,
+            rotation: this.rotation,
+            steering: this.steering,
+            speed: this.speed,
+            fuel: this.fuel,
+            occupants: Array.from(this.occupants.entries())
+        };
     }
 }
 
@@ -82,22 +100,11 @@ class VehicleManager {
     constructor() {
         this.vehicles = new Map();
         this.nextVehicleId = 1;
-        this.vehicleTypes = [
-            'car', 'motorcycle', 'truck', 'bike',
-            'boat', 'plane', 'helicopter', 'tank'
-        ];
     }
 
-    createVehicle(ownerId) {
+    createVehicle(ownerId, position, rotation, type, car_db_id) {
         const id = this.nextVehicleId++;
-        const position = {
-            x: Math.random() * 5000 - 2500,
-            y: Math.random() * 5000 - 2500,
-            z: 0
-        };
-        const rotation = Math.random() * 360;
-        const type = this.vehicleTypes[Math.floor(Math.random() * this.vehicleTypes.length)];
-        const vehicle = new Vehicle(id, type, position, rotation, ownerId);
+        const vehicle = new Vehicle(id, ownerId, position, rotation, type, car_db_id);
         this.vehicles.set(id, vehicle);
         return vehicle;
     }
@@ -107,28 +114,30 @@ class VehicleManager {
     }
 
     getVehicle(id) {
-        return this.vehicles.get(id);
+        // پشتیبانی از هم عدد و هم رشته
+        return this.vehicles.get(id) || this.vehicles.get(Number(id)) || null;
     }
 
     getAllVehicles() {
-        return Array.from(this.vehicles.values()).map(v => ({
-            id: v.id,
-            type: v.type,
-            position: v.position,
-            rotation: v.rotation,
-            speed: v.speed,
-            fuel: v.fuel,
-            occupants: Array.from(v.occupants.entries())
-        }));
+        return Array.from(this.vehicles.values()).map(v => v.getState());
     }
 
-    updateVehicle(id, position, rotation, speed, fuel) {
-        const vehicle = this.vehicles.get(id);
+    updateVehicle(id, position, rotation, speed, fuel, steering) {
+        const vehicle = this.getVehicle(id);
         if (vehicle) {
-            vehicle.update(position, rotation, speed, fuel);
+            vehicle.update(position, rotation, speed, fuel, steering);
             return true;
         }
         return false;
+    }
+
+    findVehicleByPlayer(playerId) {
+        for (const vehicle of this.vehicles.values()) {
+            if (vehicle.occupants.has(playerId) || vehicle.ownerId === playerId) {
+                return vehicle;
+            }
+        }
+        return null;
     }
 }
 
@@ -143,16 +152,14 @@ const userMap = new Map();
 // ============================================================
 // توابع کمکی
 // ============================================================
-function broadcast(message) {
+function broadcast(message, excludeId = null) {
     const data = JSON.stringify(message);
     for (const player of players.values()) {
-        // ✅ اصلاح: استفاده از عدد 1 به جای WebSocket.OPEN
-        if (player.ws.readyState === 1) { // 1 = WebSocket.OPEN
+        if (excludeId && player.id === excludeId) continue;
+        if (player.ws.readyState === 1) {
             try {
                 player.ws.send(data);
-            } catch (e) {
-                // خطای ارسال را نادیده بگیر
-            }
+            } catch (e) {}
         }
     }
 }
@@ -162,9 +169,7 @@ function sendToPlayer(playerId, message) {
     if (player && player.ws.readyState === 1) {
         try {
             player.ws.send(JSON.stringify(message));
-        } catch (e) {
-            // خطای ارسال را نادیده بگیر
-        }
+        } catch (e) {}
     }
 }
 
@@ -181,21 +186,20 @@ wss.on('connection', (ws) => {
         rotation: 0,
         ws: ws,
         vehicleId: null,
-        send: function(data) {
+        send: function (data) {
             if (this.ws.readyState === 1) {
                 try {
                     this.ws.send(JSON.stringify(data));
                 } catch (e) {}
             }
         },
-        close: function(reason) {
+        close: function (reason) {
             try {
                 this.ws.close(1000, reason);
             } catch (e) {}
         }
     };
 
-    // شناسه موقت تا زمانی که کلاینت SET_ID بفرستد
     const tempId = randomUUID();
     player.id = tempId;
     players.set(tempId, player);
@@ -205,16 +209,15 @@ wss.on('connection', (ws) => {
     ws.on('message', (data) => {
         try {
             const message = JSON.parse(data.toString());
-            const { type, id, user_id, name, job, position, rotation } = message;
+            const { type } = message;
 
             if (type === PacketType.SET_ID) {
-                const clientId = id || user_id;
+                const clientId = message.id || message.user_id;
                 if (!clientId) {
                     player.send({ type: PacketType.ERROR, message: 'Missing ID' });
                     return;
                 }
 
-                // بررسی بن بودن کاربر
                 const isBanned = bans.some(b => b.id === clientId && (!b.expires || b.expires > Date.now()));
                 if (isBanned) {
                     player.send({ type: PacketType.YOU_ARE_BANNED, message: 'You are banned from this server' });
@@ -223,27 +226,25 @@ wss.on('connection', (ws) => {
                     return;
                 }
 
-                // اگر کاربر قبلاً با این ID متصل است، اتصال قبلی را قطع کن
                 const existingPlayer = userMap.get(clientId);
                 if (existingPlayer) {
                     const oldPlayer = players.get(existingPlayer);
                     if (oldPlayer) {
                         try {
                             oldPlayer.send({ type: PacketType.ERROR, message: 'Replaced by new connection' });
-                        } catch(e) {}
+                        } catch (e) {}
                         oldPlayer.close('Replaced by new connection');
                     }
                     players.delete(existingPlayer);
                 }
 
-                // انتقال داده‌های بازیکن از اتصال موقت به اتصال اصلی
                 players.delete(tempId);
                 player.id = clientId;
                 player.user_id = clientId;
-                if (name) player.name = name;
-                if (job) player.job = job;
-                if (position) player.position = position;
-                if (rotation !== undefined) player.rotation = rotation;
+                if (message.name) player.name = message.name;
+                if (message.job) player.job = message.job;
+                if (message.position) player.position = message.position;
+                if (message.rotation !== undefined) player.rotation = message.rotation;
 
                 players.set(clientId, player);
                 userMap.set(clientId, clientId);
@@ -251,8 +252,8 @@ wss.on('connection', (ws) => {
                 player.send({ type: PacketType.SET_ID, id: clientId });
                 console.log(`✅ Client connected with ID: ${clientId}`);
 
-                // ارسال وضعیت کامل به بازیکن جدید
-                const fullState = {
+                // ارسال وضعیت کامل
+                player.send({
                     type: PacketType.FULL_STATE,
                     players: Array.from(players.values()).map(p => ({
                         id: p.id,
@@ -263,10 +264,9 @@ wss.on('connection', (ws) => {
                         rotation: p.rotation
                     })),
                     vehicles: vehicleManager.getAllVehicles()
-                };
-                player.send(fullState);
+                });
 
-                // اطلاع‌رسانی به سایر بازیکنان
+                // اطلاع به بقیه
                 broadcast({
                     type: PacketType.UPDATE,
                     id: clientId,
@@ -275,12 +275,11 @@ wss.on('connection', (ws) => {
                     job: player.job,
                     position: player.position,
                     rotation: player.rotation
-                });
+                }, clientId);
 
                 return;
             }
 
-            // پردازش پیام‌های بعد از احراز هویت
             if (!player.user_id) {
                 player.send({ type: PacketType.ERROR, message: 'Not authenticated' });
                 return;
@@ -292,22 +291,38 @@ wss.on('connection', (ws) => {
             console.error('Message parse error:', e);
             try {
                 player.send({ type: PacketType.ERROR, message: 'Invalid JSON' });
-            } catch(err) {}
+            } catch (err) {}
         }
     });
 
     ws.on('close', () => {
         const pid = player.id;
         if (pid) {
-            players.delete(pid);
-            if (player.user_id) {
-                userMap.delete(player.user_id);
-            }
+            // حذف از ماشین
             if (player.vehicleId) {
                 const vehicle = vehicleManager.getVehicle(player.vehicleId);
                 if (vehicle) {
                     vehicle.removeOccupant(player.id);
+                    // اگر صاحب ماشین بود و کسی نمانده، ماشین را پاک کن
+                    if (vehicle.ownerId === player.id && vehicle.occupants.size === 0) {
+                        vehicleManager.removeVehicle(vehicle.id);
+                        broadcast({
+                            type: PacketType.VEHICLE_REMOVED,
+                            vehicleId: vehicle.id
+                        });
+                    } else {
+                        broadcast({
+                            type: PacketType.SEAT_UPDATE,
+                            vehicleId: vehicle.id,
+                            occupants: Array.from(vehicle.occupants.entries())
+                        });
+                    }
                 }
+            }
+
+            players.delete(pid);
+            if (player.user_id) {
+                userMap.delete(player.user_id);
             }
             broadcast({ type: PacketType.PLAYER_LEFT, id: pid });
             console.log(`❌ Client disconnected: ${pid}`);
@@ -320,28 +335,18 @@ wss.on('connection', (ws) => {
 });
 
 // ============================================================
-// پردازش پیام‌های دریافتی
+// پردازش پیام‌ها
 // ============================================================
 function handleMessage(player, message) {
     const { type } = message;
 
     switch (type) {
-        case PacketType.UPDATE:
-            // به‌روزرسانی موقعیت بازیکن
-            if (message.position) {
-                player.position = message.position;
-            }
-            if (message.rotation !== undefined) {
-                player.rotation = message.rotation;
-            }
-            if (message.name) {
-                player.name = message.name;
-            }
-            if (message.job) {
-                player.job = message.job;
-            }
+        case PacketType.UPDATE: {
+            if (message.position) player.position = message.position;
+            if (message.rotation !== undefined) player.rotation = message.rotation;
+            if (message.name) player.name = message.name;
+            if (message.job) player.job = message.job;
 
-            // ارسال به‌روزرسانی به سایر بازیکنان
             broadcast({
                 type: PacketType.UPDATE,
                 id: player.id,
@@ -353,10 +358,11 @@ function handleMessage(player, message) {
                 anim: message.anim,
                 speed: message.speed,
                 is_grounded: message.is_grounded
-            });
+            }, player.id);
             break;
+        }
 
-        case PacketType.CHAT:
+        case PacketType.CHAT: {
             broadcast({
                 type: PacketType.CHAT,
                 sender_id: player.id,
@@ -364,30 +370,97 @@ function handleMessage(player, message) {
                 message: message.message
             });
             break;
+        }
 
-        case PacketType.PING:
+        case PacketType.PING: {
             player.send({ type: PacketType.PONG });
             break;
+        }
 
         case PacketType.PONG:
-            // کلاینت پونگ را دریافت می‌کند، کاری نمی‌کنیم
             break;
 
-        case PacketType.CREATE_VEHICLE:
-            const vehicle = vehicleManager.createVehicle(player.id);
-            player.vehicleId = vehicle.id;
+        // ============================================================
+        // ماشین‌ها
+        // ============================================================
+        case PacketType.CREATE_VEHICLE: {
+            const pos = message.position || { x: 0, y: 0, z: 0 };
+            const rot = message.rotation !== undefined ? message.rotation : 0;
+            const carType = message.car_type || message.type_name || 'car';
+            const carDbId = message.car_db_id || null;
+            const steering = message.steering || 0;
+
+            // اگر قبلاً ماشین داشت، پاک کن
+            if (player.vehicleId) {
+                const old = vehicleManager.getVehicle(player.vehicleId);
+                if (old) {
+                    vehicleManager.removeVehicle(old.id);
+                    broadcast({
+                        type: PacketType.VEHICLE_REMOVED,
+                        vehicleId: old.id
+                    });
+                }
+            }
+
+            const vehicle = vehicleManager.createVehicle(
+                player.id,
+                { x: pos.x, y: pos.y, z: pos.z },
+                rot,
+                carType,
+                carDbId
+            );
+            vehicle.steering = steering;
             vehicle.addOccupant(player.id, 0);
+            player.vehicleId = vehicle.id;
+
+            console.log(`🚗 Vehicle created id=${vehicle.id} type=${carType} pos=`, vehicle.position);
+
             broadcast({
                 type: PacketType.VEHICLE_STATE,
                 vehicles: vehicleManager.getAllVehicles()
             });
             break;
+        }
 
-        case PacketType.JOIN_VEHICLE:
+        case PacketType.UPDATE_VEHICLE: {
+            const vid = message.vehicleId || message.id;
+            if (!vid || !message.position) break;
+
+            const vehicle = vehicleManager.getVehicle(vid);
+            if (!vehicle) break;
+
+            // فقط صاحب یا سرنشین بتواند آپدیت کند
+            if (vehicle.ownerId !== player.id && !vehicle.occupants.has(player.id)) {
+                break;
+            }
+
+            vehicle.update(
+                {
+                    x: message.position.x,
+                    y: message.position.y,
+                    z: message.position.z
+                },
+                message.rotation,
+                message.speed,
+                message.fuel,
+                message.steering
+            );
+
+            if (message.car_type) vehicle.type = message.car_type;
+            if (message.car_db_id) vehicle.car_db_id = message.car_db_id;
+
+            broadcast({
+                type: PacketType.VEHICLE_STATE,
+                vehicles: vehicleManager.getAllVehicles()
+            });
+            break;
+        }
+
+        case PacketType.JOIN_VEHICLE: {
             const joinVid = message.vehicleId;
             const joinVehicle = vehicleManager.getVehicle(joinVid);
             if (joinVehicle) {
-                const seatIndex = message.seatIndex || 0;
+                const seatIndex = message.seatIndex || 1;
                 joinVehicle.addOccupant(player.id, seatIndex);
                 player.vehicleId = joinVid;
                 broadcast({
@@ -397,59 +470,57 @@ function handleMessage(player, message) {
                 });
             }
             break;
+        }
 
-        case PacketType.LEAVE_VEHICLE:
-            const leaveVid = player.vehicleId;
+        case PacketType.LEAVE_VEHICLE: {
+            const leaveVid = player.vehicleId || message.vehicleId;
             if (leaveVid) {
                 const leaveVehicle = vehicleManager.getVehicle(leaveVid);
                 if (leaveVehicle) {
                     leaveVehicle.removeOccupant(player.id);
+
+                    // اگر صاحب رفت و کسی نماند، ماشین را پاک کن
+                    if (leaveVehicle.ownerId === player.id && leaveVehicle.occupants.size === 0) {
+                        vehicleManager.removeVehicle(leaveVehicle.id);
+                        broadcast({
+                            type: PacketType.VEHICLE_REMOVED,
+                            vehicleId: leaveVehicle.id
+                        });
+                    } else {
+                        broadcast({
+                            type: PacketType.SEAT_UPDATE,
+                            vehicleId: leaveVid,
+                            occupants: Array.from(leaveVehicle.occupants.entries())
+                        });
+                    }
                 }
                 player.vehicleId = null;
-                broadcast({
-                    type: PacketType.SEAT_UPDATE,
-                    vehicleId: leaveVid,
-                    occupants: leaveVehicle ? Array.from(leaveVehicle.occupants.entries()) : []
-                });
             }
             break;
+        }
 
-        case PacketType.UPDATE_VEHICLE:
-            if (message.vehicleId && message.position) {
-                const updated = vehicleManager.updateVehicle(
-                    message.vehicleId,
-                    message.position,
-                    message.rotation,
-                    message.speed,
-                    message.fuel
-                );
-                if (updated) {
-                    broadcast({
-                        type: PacketType.VEHICLE_STATE,
-                        vehicles: vehicleManager.getAllVehicles()
-                    });
-                }
-            }
-            break;
-
-        case PacketType.BAN_PLAYER:
-            // فقط ادمین‌ها می‌توانند بن کنند (در اینجا ساده شده)
+        // ============================================================
+        // بن
+        // ============================================================
+        case PacketType.BAN_PLAYER: {
             if (player.job === 'ادمین') {
-                const targetId = message.targetId;
-                const duration = message.duration || 3600000; // 1 ساعت پیش‌فرض
+                const targetId = message.targetId || message.target_id;
+                const duration = message.duration || 3600000;
                 const reason = message.reason || 'No reason provided';
                 const banEntry = {
                     id: targetId,
                     reason: reason,
-                    expires: Date.now() + duration
+                    expires: duration === -1 ? null : Date.now() + duration
                 };
                 bans.push(banEntry);
                 fs.writeFileSync(banFilePath, JSON.stringify(bans));
 
-                // قطع کردن بازیکن بن شده
                 const targetPlayer = players.get(targetId);
                 if (targetPlayer) {
-                    targetPlayer.send({ type: PacketType.YOU_ARE_BANNED, message: `You are banned: ${reason}` });
+                    targetPlayer.send({
+                        type: PacketType.YOU_ARE_BANNED,
+                        message: `You are banned: ${reason}`
+                    });
                     targetPlayer.close('Banned');
                     players.delete(targetId);
                     userMap.delete(targetId);
@@ -457,21 +528,24 @@ function handleMessage(player, message) {
                 broadcast({ type: PacketType.BAN_LIST, bans: bans });
             }
             break;
+        }
 
-        case PacketType.UNBAN_PLAYER:
+        case PacketType.UNBAN_PLAYER: {
             if (player.job === 'ادمین') {
-                const targetId = message.targetId;
+                const targetId = message.targetId || message.target_id;
                 bans = bans.filter(b => b.id !== targetId);
                 fs.writeFileSync(banFilePath, JSON.stringify(bans));
                 broadcast({ type: PacketType.BAN_LIST, bans: bans });
             }
             break;
+        }
 
-        case PacketType.BAN_LIST:
+        case PacketType.BAN_LIST: {
             if (player.job === 'ادمین') {
                 player.send({ type: PacketType.BAN_LIST, bans: bans });
             }
             break;
+        }
 
         default:
             console.log(`⚠️ Unknown message type: ${type}`);
@@ -479,7 +553,7 @@ function handleMessage(player, message) {
 }
 
 // ============================================================
-// ارسال وضعیت کامل به همه بازیکنان (هر ۵۰۰ms)
+// ارسال وضعیت کامل هر ۵۰۰ms
 // ============================================================
 setInterval(() => {
     const fullState = {
@@ -496,49 +570,29 @@ setInterval(() => {
     };
 
     for (const player of players.values()) {
-        // ✅ اصلاح: استفاده از عدد 1 به جای WebSocket.OPEN
         if (player.ws.readyState === 1) {
             try {
                 player.ws.send(JSON.stringify(fullState));
-            } catch (e) {
-                // خطا را نادیده بگیر
-            }
+            } catch (e) {}
         }
     }
 }, 500);
 
 // ============================================================
-// به‌روزرسانی دوره‌ای وضعیت ماشین‌ها (هر ۱ ثانیه)
-// ============================================================
-setInterval(() => {
-    const vehicleUpdates = vehicleManager.getAllVehicles().map(v => ({
-        id: v.id,
-        position: v.position,
-        rotation: v.rotation,
-        speed: v.speed,
-        fuel: v.fuel
-    }));
-    broadcast({ type: PacketType.VEHICLE_STATE, vehicles: vehicleUpdates });
-}, 1000);
-
-// ============================================================
-// Keep-alive (هر ۱۰ ثانیه)
+// Keep-alive هر ۱۰ ثانیه
 // ============================================================
 setInterval(() => {
     for (const player of players.values()) {
-        // ✅ اصلاح: استفاده از عدد 1 به جای WebSocket.OPEN
         if (player.ws.readyState === 1) {
             try {
                 player.ws.send(JSON.stringify({ type: PacketType.PING }));
-            } catch (e) {
-                // خطا را نادیده بگیر
-            }
+            } catch (e) {}
         }
     }
 }, 10000);
 
 // ============================================================
-// مدیریت خاموش شدن
+// خاموش شدن
 // ============================================================
 process.on('SIGTERM', () => {
     console.log('Shutting down...');
@@ -546,5 +600,5 @@ process.on('SIGTERM', () => {
     process.exit(0);
 });
 
-console.log(`🚀 Server running on port ${config.port || 8080} | Mode: Waiting for player ID from client`);
+console.log(`🚀 Server running on port ${config.port || 8080}`);
 console.log('🚀 Server is ready and waiting for connections!');
