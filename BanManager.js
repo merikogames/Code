@@ -1,57 +1,58 @@
-import fs from 'fs/promises';
-import config from './config.js';
+const fs = require('fs');
+const path = require('path');
+const BANS_FILE = path.join(__dirname, '../data/bans.json');
 
-export default class BanManager {
-  constructor() {
-    this.bannedIds = new Set();
-    this.banFile = config.banFile;
-    this.loadBans();
-  }
-
-  async loadBans() {
-    try {
-      const data = await fs.readFile(this.banFile, 'utf-8');
-      const list = JSON.parse(data);
-      this.bannedIds = new Set(list);
-      console.log(`✅ Loaded ${this.bannedIds.size} bans.`);
-    } catch (err) {
-      if (err.code === 'ENOENT') {
-        await this.saveBans();
-        console.log('📄 Created new ban file.');
-      } else {
-        console.error('❌ Failed to load ban file:', err);
-      }
+class BanManager {
+    static loadBans() {
+        try {
+            if (fs.existsSync(BANS_FILE)) {
+                const data = fs.readFileSync(BANS_FILE, 'utf8');
+                return JSON.parse(data);
+            }
+        } catch (e) {
+            return {};
+        }
     }
-  }
 
-  async saveBans() {
-    try {
-      const list = Array.from(this.bannedIds);
-      await fs.writeFile(this.banFile, JSON.stringify(list, null, 2));
-    } catch (err) {
-      console.error('❌ Failed to save ban file:', err);
+    static saveBans(bans) {
+        const dir = path.dirname(BANS_FILE);
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+        }
+        fs.writeFileSync(BANS_FILE, JSON.stringify(bans, null, 2));
     }
-  }
 
-  async ban(playerId) {
-    if (this.bannedIds.has(playerId)) return false;
-    this.bannedIds.add(playerId);
-    await this.saveBans();
-    return true;
-  }
+    static banPlayer(playerId, duration, reason = '') {
+        const bans = BanManager.loadBans();
+        bans[playerId] = {
+            until: duration === -1 ? -1 : Date.now() + duration * 1000,
+            reason: reason || 'No reason'
+        };
+        BanManager.saveBans(bans);
+        console.log(`[BAN] ${playerId} banned until ${bans[playerId].until}`);
+    }
 
-  async unban(playerId) {
-    if (!this.bannedIds.has(playerId)) return false;
-    this.bannedIds.delete(playerId);
-    await this.saveBans();
-    return true;
-  }
+    static unbanPlayer(playerId) {
+        const bans = BanManager.loadBans();
+        if (bans[playerId]) {
+            delete bans[playerId];
+            BanManager.saveBans(bans);
+            console.log(`[UNBAN] ${playerId} unbanned`);
+        }
+    }
 
-  isBanned(playerId) {
-    return this.bannedIds.has(playerId);
-  }
-
-  getBanList() {
-    return Array.from(this.bannedIds);
-  }
+    static isBanned(playerId) {
+        const bans = BanManager.loadBans();
+        const ban = bans[playerId];
+        if (!ban) return false;
+        if (ban.until === -1) return true;
+        if (Date.now() > ban.until) {
+            delete bans[playerId];
+            BanManager.saveBans(bans);
+            return false;
+        }
+        return true;
+    }
 }
+
+module.exports = BanManager;
