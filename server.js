@@ -7,18 +7,14 @@ const crypto = require('crypto');
 
 const PORT = process.env.PORT || 8080;
 const BAN_FILE = path.join(__dirname, 'bans.json');
-const DATA_DIR = path.join(__dirname, 'data');
-
-// اطمینان از وجود پوشه
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 // ==================== State ====================
-const clients = new Map();          // ws -> { id, name, job, token, isBanned, ... }
-const players = new Map();          // id -> player data
-const vehicles = new Map();         // vehicleId -> vehicle data
-let bans = {};                      // id -> { expire, reason, permanent }
+const clients = new Map();
+const players = new Map();
+const vehicles = new Map();
+let bans = {};
 
-// ==================== Load / Save Bans ====================
+// ==================== Ban ====================
 function loadBans() {
   try {
     if (fs.existsSync(BAN_FILE)) {
@@ -26,7 +22,6 @@ function loadBans() {
       console.log(`✅ Loaded ${Object.keys(bans).length} bans`);
     }
   } catch (e) {
-    console.error('Error loading bans:', e.message);
     bans = {};
   }
 }
@@ -35,7 +30,7 @@ function saveBans() {
   try {
     fs.writeFileSync(BAN_FILE, JSON.stringify(bans, null, 2));
   } catch (e) {
-    console.error('Error saving bans:', e.message);
+    console.error('saveBans error:', e.message);
   }
 }
 
@@ -78,19 +73,32 @@ function broadcast(data, excludeId = null) {
   const msg = JSON.stringify(data);
   for (const [ws, client] of clients) {
     if (client.id === excludeId) continue;
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(msg);
-    }
+    if (ws.readyState === WebSocket.OPEN) ws.send(msg);
   }
 }
 
 function broadcastToAll(data) {
   const msg = JSON.stringify(data);
   for (const [ws] of clients) {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(msg);
-    }
+    if (ws.readyState === WebSocket.OPEN) ws.send(msg);
   }
+}
+
+function formatVehicle(v) {
+  return {
+    id: v.id,
+    position: v.position,
+    rotation: v.rotation,
+    speed: v.speed || 0,
+    steering: v.steering || 0,
+    occupants: v.occupants || [null, null, null, null, null],
+    ownerId: v.ownerId || '',
+    owner_id: v.ownerId || '',
+    type: v.car_type || 'car',
+    car_type: v.car_type || 'car',
+    car_db_id: v.car_db_id || '',
+    fuel: v.fuel !== undefined ? v.fuel : 100
+  };
 }
 
 function getFullState() {
@@ -110,35 +118,34 @@ function getFullState() {
   }
 
   const vehiclesArr = [];
-  for (const [vid, v] of vehicles) {
-    vehiclesArr.push({
-      id: vid,
-      position: v.position,
-      rotation: v.rotation,
-      speed: v.speed,
-      steering: v.steering,
-      occupants: v.occupants,
-      ownerId: v.ownerId,
-      owner_id: v.ownerId,
-      type: v.car_type,
-      car_type: v.car_type,
-      car_db_id: v.car_db_id,
-      fuel: v.fuel
-    });
+  for (const [, v] of vehicles) {
+    vehiclesArr.push(formatVehicle(v));
   }
 
   return { type: 'full_state', players: playersArr, vehicles: vehiclesArr };
 }
 
+// فقط از صندلی‌ها خارج می‌کند — ماشین را حذف نمی‌کند
+function removePlayerFromAllVehicles(playerId) {
+  for (const [, v] of vehicles) {
+    if (!Array.isArray(v.occupants)) continue;
+    for (let i = 0; i < v.occupants.length; i++) {
+      if (v.occupants[i] === playerId) {
+        v.occupants[i] = null;
+      }
+    }
+  }
+}
+
 // ==================== Server ====================
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Poppo Multiplayer Server is running\n');
+  res.end('Poppo Multiplayer Server OK\n');
 });
 
 const wss = new WebSocket.Server({ server });
 
-wss.on('connection', (ws, req) => {
+wss.on('connection', (ws) => {
   console.log('🔌 New connection');
 
   const client = {
@@ -158,16 +165,11 @@ wss.on('connection', (ws, req) => {
     } catch (e) {
       return;
     }
-
     if (!data || !data.type) return;
 
     switch (data.type) {
-      case 'set_id':
-        handleSetId(ws, client, data);
-        break;
-      case 'update':
-        handlePlayerUpdate(ws, client, data);
-        break;
+      case 'set_id':           handleSetId(ws, client, data); break;
+      case 'update':          handlePlayerUpdate(ws, client, data); break;
       case 'ping':
         client.lastPing = Date.now();
         send(ws, { type: 'pong' });
@@ -175,42 +177,20 @@ wss.on('connection', (ws, req) => {
       case 'pong':
         client.lastPing = Date.now();
         break;
-      case 'chat':
-        handleChat(ws, client, data);
-        break;
-      case 'create_vehicle':
-        handleCreateVehicle(ws, client, data);
-        break;
-      case 'update_vehicle':
-        handleUpdateVehicle(ws, client, data);
-        break;
-      case 'join_vehicle':
-        handleJoinVehicle(ws, client, data);
-        break;
-      case 'leave_vehicle':
-        handleLeaveVehicle(ws, client, data);
-        break;
-      case 'seat_update':
-        handleSeatUpdate(ws, client, data);
-        break;
-      case 'ban_player':
-        handleBanPlayer(ws, client, data);
-        break;
-      case 'unban_player':
-        handleUnbanPlayer(ws, client, data);
-        break;
-      default:
-        break;
+      case 'chat':            handleChat(ws, client, data); break;
+      case 'create_vehicle':  handleCreateVehicle(ws, client, data); break;
+      case 'update_vehicle':  handleUpdateVehicle(ws, client, data); break;
+      case 'join_vehicle':    handleJoinVehicle(ws, client, data); break;
+      case 'leave_vehicle':   handleLeaveVehicle(ws, client, data); break;
+      case 'seat_update':     handleSeatUpdate(ws, client, data); break;
+      case 'ban_player':      handleBanPlayer(ws, client, data); break;
+      case 'unban_player':    handleUnbanPlayer(ws, client, data); break;
+      default: break;
     }
   });
 
-  ws.on('close', () => {
-    handleDisconnect(ws, client);
-  });
-
-  ws.on('error', (err) => {
-    console.error('WS error:', err.message);
-  });
+  ws.on('close', () => handleDisconnect(ws, client));
+  ws.on('error', (err) => console.error('WS error:', err.message));
 });
 
 // ==================== Handlers ====================
@@ -221,12 +201,13 @@ function handleSetId(ws, client, data) {
     return;
   }
 
-  // اگر قبلاً با این id وصل بوده، قبلی را پاک کن
+  // اتصال قبلی با همین id را ببند
   for (const [oldWs, oldClient] of clients) {
     if (oldClient.id === id && oldWs !== ws) {
       try { oldWs.close(); } catch (_) {}
       clients.delete(oldWs);
       players.delete(id);
+      removePlayerFromAllVehicles(id);
     }
   }
 
@@ -235,7 +216,6 @@ function handleSetId(ws, client, data) {
   client.job = String(data.job || 'بیکار');
   client.token = String(data.token || '');
 
-  // چک بن
   if (isBanned(id)) {
     client.isBanned = true;
     const banInfo = getBanInfo(id);
@@ -243,15 +223,13 @@ function handleSetId(ws, client, data) {
       type: 'you_are_banned',
       message: banInfo.reason,
       reason: banInfo.reason,
-      expire: banInfo.expire,
-      duration: banInfo.expire === -1 ? -1 : undefined
+      expire: banInfo.expire
     });
-    console.log(`🚫 Banned player connected: ${client.name} (${id})`);
+    console.log(`🚫 Banned connected: ${client.name}`);
   } else {
     client.isBanned = false;
   }
 
-  // ثبت در players
   players.set(id, {
     name: client.name,
     job: client.job,
@@ -262,22 +240,13 @@ function handleSetId(ws, client, data) {
     is_grounded: true
   });
 
-  // پاسخ set_id
-  send(ws, {
-    type: 'set_id',
-    id: id,
-    data: { token: client.token }
-  });
-
-  // ارسال full_state به همه
+  send(ws, { type: 'set_id', id, data: { token: client.token } });
   broadcastToAll(getFullState());
-
-  console.log(`✅ Player joined: ${client.name} (${id}) | Banned: ${client.isBanned}`);
+  console.log(`✅ Joined: ${client.name} (${id})`);
 }
 
 function handlePlayerUpdate(ws, client, data) {
   if (!client.id) return;
-
   const p = players.get(client.id);
   if (!p) return;
 
@@ -289,19 +258,12 @@ function handlePlayerUpdate(ws, client, data) {
     };
   }
   if (data.rotation !== undefined) p.rotation = Number(data.rotation) || 0;
-  if (data.name) {
-    p.name = String(data.name);
-    client.name = p.name;
-  }
-  if (data.job) {
-    p.job = String(data.job);
-    client.job = p.job;
-  }
+  if (data.name) { p.name = String(data.name); client.name = p.name; }
+  if (data.job) { p.job = String(data.job); client.job = p.job; }
   if (data.anim !== undefined) p.anim = Number(data.anim) || 0;
   if (data.speed !== undefined) p.speed = Number(data.speed) || 0;
   if (data.is_grounded !== undefined) p.is_grounded = !!data.is_grounded;
 
-  // فقط به بقیه بفرست
   broadcast({
     type: 'update',
     user_id: client.id,
@@ -319,10 +281,9 @@ function handlePlayerUpdate(ws, client, data) {
 function handleChat(ws, client, data) {
   if (!client.id) return;
   if (client.isBanned) {
-    send(ws, { type: 'error', message: 'شما بن شده‌اید و نمی‌توانید چت کنید' });
+    send(ws, { type: 'error', message: 'شما بن شده‌اید' });
     return;
   }
-
   const message = String(data.message || '').trim();
   if (!message || message.length > 300) return;
 
@@ -330,21 +291,55 @@ function handleChat(ws, client, data) {
     type: 'chat',
     sender_id: client.id,
     sender_name: client.name,
-    message: message
+    message
   });
 }
 
+// ---------- ماشین‌ها ----------
 function handleCreateVehicle(ws, client, data) {
   if (!client.id) return;
 
+  // اگر قبلاً ماشینی دارد که صاحبش است → همان را آپدیت کن، جدید نساز
+  for (const [vid, v] of vehicles) {
+    if (v.ownerId === client.id) {
+      if (data.position) {
+        v.position = {
+          x: Number(data.position.x) || 0,
+          y: Number(data.position.y) || 0,
+          z: Number(data.position.z) || 0
+        };
+      }
+      if (data.rotation !== undefined) v.rotation = Number(data.rotation) || 0;
+      if (data.steering !== undefined) v.steering = Number(data.steering) || 0;
+      if (data.car_type) v.car_type = String(data.car_type);
+      if (data.car_db_id) v.car_db_id = String(data.car_db_id);
+
+      if (!Array.isArray(v.occupants)) v.occupants = [null, null, null, null, null];
+      while (v.occupants.length < 5) v.occupants.push(null);
+
+      // اگر داخل هیچ صندلی نیست، بگذار راننده
+      if (!v.occupants.includes(client.id)) {
+        v.occupants[0] = client.id;
+      }
+
+      broadcastToAll({ type: 'vehicle_update', vehicles: [formatVehicle(v)] });
+      return;
+    }
+  }
+
+  // ماشین جدید
   const vid = genId();
   const vehicle = {
     id: vid,
-    position: data.position || { x: 0, y: 0, z: 0 },
+    position: data.position ? {
+      x: Number(data.position.x) || 0,
+      y: Number(data.position.y) || 0,
+      z: Number(data.position.z) || 0
+    } : { x: 0, y: 0, z: 0 },
     rotation: Number(data.rotation) || 0,
     speed: 0,
     steering: Number(data.steering) || 0,
-    occupants: [client.id],          // راننده در صندلی ۰
+    occupants: [client.id, null, null, null, null],
     ownerId: client.id,
     car_type: String(data.car_type || 'car'),
     car_db_id: String(data.car_db_id || ''),
@@ -352,40 +347,8 @@ function handleCreateVehicle(ws, client, data) {
   };
 
   vehicles.set(vid, vehicle);
-
-  broadcastToAll({
-    type: 'vehicle_update',
-    vehicles: [{
-      id: vid,
-      position: vehicle.position,
-      rotation: vehicle.rotation,
-      speed: vehicle.speed,
-      steering: vehicle.steering,
-      occupants: vehicle.occupants,
-      ownerId: vehicle.ownerId,
-      owner_id: vehicle.ownerId,
-      type: vehicle.car_type,
-      car_type: vehicle.car_type,
-      car_db_id: vehicle.car_db_id,
-      fuel: vehicle.fuel
-    }]
-  });
-
-  // به خود بازیکن هم id ماشین را بده (اختیاری)
-  send(ws, {
-    type: 'vehicle_update',
-    vehicle: {
-      id: vid,
-      position: vehicle.position,
-      rotation: vehicle.rotation,
-      occupants: vehicle.occupants,
-      ownerId: vehicle.ownerId,
-      car_type: vehicle.car_type,
-      car_db_id: vehicle.car_db_id
-    }
-  });
-
-  console.log(`🚗 Vehicle created: ${vid} by ${client.name}`);
+  broadcastToAll({ type: 'vehicle_update', vehicles: [formatVehicle(vehicle)] });
+  console.log(`🚗 Created: ${vid} by ${client.name}`);
 }
 
 function handleUpdateVehicle(ws, client, data) {
@@ -395,8 +358,6 @@ function handleUpdateVehicle(ws, client, data) {
   if (!vid || !vehicles.has(vid)) return;
 
   const v = vehicles.get(vid);
-
-  // فقط صاحب یا کسی که داخل ماشین است می‌تواند آپدیت کند
   const isOccupant = Array.isArray(v.occupants) && v.occupants.includes(client.id);
   if (v.ownerId !== client.id && !isOccupant) return;
 
@@ -414,30 +375,15 @@ function handleUpdateVehicle(ws, client, data) {
   if (data.car_type) v.car_type = String(data.car_type);
   if (data.car_db_id) v.car_db_id = String(data.car_db_id);
 
-  broadcast({
-    type: 'vehicle_update',
-    vehicles: [{
-      id: vid,
-      position: v.position,
-      rotation: v.rotation,
-      speed: v.speed,
-      steering: v.steering,
-      occupants: v.occupants,
-      ownerId: v.ownerId,
-      owner_id: v.ownerId,
-      type: v.car_type,
-      car_type: v.car_type,
-      car_db_id: v.car_db_id,
-      fuel: v.fuel
-    }]
-  }, client.id);
+  broadcastToAll({ type: 'vehicle_update', vehicles: [formatVehicle(v)] });
 }
 
 function handleJoinVehicle(ws, client, data) {
   if (!client.id) return;
 
   const vid = String(data.vehicleId || '');
-  const seatIndex = Number(data.seatIndex) || 1;
+  let seatIndex = Number(data.seatIndex);
+  if (isNaN(seatIndex) || seatIndex < 0) seatIndex = 1;
 
   if (!vid || !vehicles.has(vid)) {
     send(ws, { type: 'error', message: 'Vehicle not found' });
@@ -445,69 +391,50 @@ function handleJoinVehicle(ws, client, data) {
   }
 
   const v = vehicles.get(vid);
-  if (!Array.isArray(v.occupants)) v.occupants = [];
-
-  // صندلی‌ها را تا ۵ تا پر کن
+  if (!Array.isArray(v.occupants)) v.occupants = [null, null, null, null, null];
   while (v.occupants.length < 5) v.occupants.push(null);
 
-  if (v.occupants[seatIndex]) {
-    send(ws, { type: 'error', message: 'Seat is taken' });
-    return;
-  }
+  // از همه ماشین‌ها خارج کن (ماشین‌ها حذف نمی‌شوند)
+  removePlayerFromAllVehicles(client.id);
 
-  // از ماشین قبلی خارج کن
-  for (const [otherVid, otherV] of vehicles) {
-    if (Array.isArray(otherV.occupants)) {
-      const idx = otherV.occupants.indexOf(client.id);
-      if (idx !== -1) {
-        otherV.occupants[idx] = null;
-      }
+  // صندلی خالی پیدا کن
+  if (v.occupants[seatIndex]) {
+    let found = -1;
+    for (let i = 1; i < v.occupants.length; i++) {
+      if (!v.occupants[i]) { found = i; break; }
     }
+    if (found === -1) {
+      send(ws, { type: 'error', message: 'No free seat' });
+      return;
+    }
+    seatIndex = found;
   }
 
   v.occupants[seatIndex] = client.id;
-  if (!v.ownerId) v.ownerId = client.id;
+  // owner عوض نمی‌شود
 
-  broadcastToAll({
-    type: 'seat_update',
-    vehicleId: vid,
-    occupants: v.occupants
-  });
-
-  console.log(`👤 ${client.name} joined vehicle ${vid} seat ${seatIndex}`);
+  broadcastToAll({ type: 'seat_update', vehicleId: vid, occupants: v.occupants });
+  broadcastToAll({ type: 'vehicle_update', vehicles: [formatVehicle(v)] });
+  console.log(`👤 ${client.name} joined ${vid} seat ${seatIndex}`);
 }
 
 function handleLeaveVehicle(ws, client, data) {
   if (!client.id) return;
 
   const vid = String(data.vehicleId || '');
-  if (!vid || !vehicles.has(vid)) return;
+  removePlayerFromAllVehicles(client.id);
 
-  const v = vehicles.get(vid);
-  if (!Array.isArray(v.occupants)) return;
-
-  const idx = v.occupants.indexOf(client.id);
-  if (idx !== -1) {
-    v.occupants[idx] = null;
-  }
-
-  // اگر کسی نماند، ماشین را حذف کن
-  const hasAnyone = v.occupants.some(o => o);
-  if (!hasAnyone) {
-    vehicles.delete(vid);
-    broadcastToAll({ type: 'vehicle_removed', vehicleId: vid, id: vid });
+  // ماشین حذف نمی‌شود — فقط seat آپدیت می‌شود
+  if (vid && vehicles.has(vid)) {
+    const v = vehicles.get(vid);
+    broadcastToAll({ type: 'seat_update', vehicleId: vid, occupants: v.occupants });
+    broadcastToAll({ type: 'vehicle_update', vehicles: [formatVehicle(v)] });
   } else {
-    if (v.ownerId === client.id) {
-      // صاحب را به اولین نفر منتقل کن
-      const next = v.occupants.find(o => o);
-      v.ownerId = next || '';
+    for (const [id, v] of vehicles) {
+      broadcastToAll({ type: 'seat_update', vehicleId: id, occupants: v.occupants });
     }
-    broadcastToAll({
-      type: 'seat_update',
-      vehicleId: vid,
-      occupants: v.occupants
-    });
   }
+  console.log(`🚪 ${client.name} left vehicle`);
 }
 
 function handleSeatUpdate(ws, client, data) {
@@ -516,60 +443,47 @@ function handleSeatUpdate(ws, client, data) {
   if (!vid || !vehicles.has(vid)) return;
 
   const v = vehicles.get(vid);
-  if (Array.isArray(data.occupants)) {
-    v.occupants = data.occupants;
-  }
+  if (Array.isArray(data.occupants)) v.occupants = data.occupants;
 
-  broadcastToAll({
-    type: 'seat_update',
-    vehicleId: vid,
-    occupants: v.occupants
-  });
+  broadcastToAll({ type: 'seat_update', vehicleId: vid, occupants: v.occupants });
 }
 
 function handleBanPlayer(ws, client, data) {
-  // فقط ادمین‌ها (level >= 1 در کلاینت چک می‌شود، اینجا ساده نگه می‌داریم)
-  // اگر می‌خواهی سخت‌گیرانه‌تر کنی، لیست ادمین بساز
   if (!client.id) return;
-
   const targetId = String(data.targetId || '');
   if (!targetId) return;
 
   const duration = Number(data.duration);
   const reason = String(data.reason || 'بن شده توسط بازرسی');
-
   const permanent = duration <= 0;
   const expire = permanent ? -1 : Math.floor(Date.now() / 1000) + duration;
 
   bans[targetId] = {
-    expire: expire,
-    reason: reason,
-    permanent: permanent,
+    expire,
+    reason,
+    permanent,
     bannedBy: client.id,
     bannedAt: Math.floor(Date.now() / 1000)
   };
   saveBans();
 
-  // به خود بازیکن بن‌شده اطلاع بده
   for (const [targetWs, targetClient] of clients) {
     if (targetClient.id === targetId) {
       targetClient.isBanned = true;
       send(targetWs, {
         type: 'you_are_banned',
         message: reason,
-        reason: reason,
-        expire: expire
+        reason,
+        expire
       });
       break;
     }
   }
-
-  console.log(`🚫 ${client.name} banned ${targetId} | permanent: ${permanent}`);
+  console.log(`🚫 Ban: ${targetId} by ${client.name}`);
 }
 
 function handleUnbanPlayer(ws, client, data) {
   if (!client.id) return;
-
   const targetId = String(data.targetId || '');
   if (!targetId) return;
 
@@ -578,7 +492,6 @@ function handleUnbanPlayer(ws, client, data) {
     saveBans();
   }
 
-  // به بازیکن اطلاع بده
   for (const [targetWs, targetClient] of clients) {
     if (targetClient.id === targetId) {
       targetClient.isBanned = false;
@@ -586,69 +499,37 @@ function handleUnbanPlayer(ws, client, data) {
       break;
     }
   }
-
-  console.log(`✅ ${client.name} unbanned ${targetId}`);
+  console.log(`✅ Unban: ${targetId}`);
 }
 
 function handleDisconnect(ws, client) {
   if (client.id) {
     players.delete(client.id);
-
-    // از همه ماشین‌ها خارج کن
-    for (const [vid, v] of vehicles) {
-      if (Array.isArray(v.occupants)) {
-        const idx = v.occupants.indexOf(client.id);
-        if (idx !== -1) {
-          v.occupants[idx] = null;
-        }
-      }
-      if (v.ownerId === client.id) {
-        const next = (v.occupants || []).find(o => o);
-        v.ownerId = next || '';
-      }
-    }
-
-    // ماشین‌های خالی را پاک کن
-    for (const [vid, v] of [...vehicles]) {
-      const hasAnyone = (v.occupants || []).some(o => o);
-      if (!hasAnyone) {
-        vehicles.delete(vid);
-        broadcastToAll({ type: 'vehicle_removed', vehicleId: vid, id: vid });
-      } else {
-        broadcastToAll({
-          type: 'seat_update',
-          vehicleId: vid,
-          occupants: v.occupants
-        });
-      }
-    }
-
+    removePlayerFromAllVehicles(client.id); // فقط از صندلی‌ها خارج می‌شود
     broadcastToAll({ type: 'player_left', id: client.id });
-    console.log(`👋 Player left: ${client.name} (${client.id})`);
+    // ماشین‌ها را broadcast کن تا بقیه ببینند صندلی خالی شده
+    for (const [vid, v] of vehicles) {
+      broadcastToAll({ type: 'seat_update', vehicleId: vid, occupants: v.occupants });
+    }
+    console.log(`👋 Left: ${client.name}`);
   }
   clients.delete(ws);
 }
 
-// ==================== Cleanup & Keepalive ====================
+// ==================== Keepalive ====================
 setInterval(() => {
   const now = Date.now();
   for (const [ws, client] of clients) {
-    if (now - client.lastPing > 45000) { // 45 ثانیه بدون پینگ
-      console.log(`⏱️ Timeout: ${client.name || 'unknown'}`);
+    if (now - client.lastPing > 45000) {
       try { ws.close(); } catch (_) {}
     }
   }
 }, 15000);
 
-// هر ۳۰ ثانیه full_state بفرست (برای همگام‌سازی)
 setInterval(() => {
-  if (clients.size > 0) {
-    broadcastToAll(getFullState());
-  }
+  if (clients.size > 0) broadcastToAll(getFullState());
 }, 30000);
 
-// ==================== Start ====================
 server.listen(PORT, () => {
-  console.log(`🚀 Poppo Multiplayer Server running on port ${PORT}`);
-  console.log(`📁 Ban file: ${BAN_FILE}`);
+  console.log(`🚀 Server on port ${PORT}`);
 });
