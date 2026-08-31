@@ -311,10 +311,15 @@ wss.on('connection', (ws) => {
                             vehicleId: vehicle.id
                         });
                     } else {
+                        // هم SEAT_UPDATE و هم VEHICLE_STATE بفرست تا مطمئن بشیم همه آپدیت می‌شن
                         broadcast({
                             type: PacketType.SEAT_UPDATE,
                             vehicleId: vehicle.id,
                             occupants: Array.from(vehicle.occupants.entries())
+                        });
+                        broadcast({
+                            type: PacketType.VEHICLE_STATE,
+                            vehicles: vehicleManager.getAllVehicles()
                         });
                     }
                 }
@@ -463,10 +468,19 @@ function handleMessage(player, message) {
                 const seatIndex = message.seatIndex || 1;
                 joinVehicle.addOccupant(player.id, seatIndex);
                 player.vehicleId = joinVid;
+
+                console.log(`👤 Player ${player.id} joined vehicle ${joinVid} on seat ${seatIndex}`);
+
+                // هم SEAT_UPDATE و هم VEHICLE_STATE کامل بفرست تا همه کلاینت‌ها ببینن
                 broadcast({
                     type: PacketType.SEAT_UPDATE,
                     vehicleId: joinVid,
                     occupants: Array.from(joinVehicle.occupants.entries())
+                });
+
+                broadcast({
+                    type: PacketType.VEHICLE_STATE,
+                    vehicles: vehicleManager.getAllVehicles()
                 });
             }
             break;
@@ -492,6 +506,10 @@ function handleMessage(player, message) {
                             vehicleId: leaveVid,
                             occupants: Array.from(leaveVehicle.occupants.entries())
                         });
+                        broadcast({
+                            type: PacketType.VEHICLE_STATE,
+                            vehicles: vehicleManager.getAllVehicles()
+                        });
                     }
                 }
                 player.vehicleId = null;
@@ -500,50 +518,52 @@ function handleMessage(player, message) {
         }
 
         // ============================================================
-        // بن
+        // بن (بدون چک شغل - هر کسی می‌تونه بن کنه)
         // ============================================================
         case PacketType.BAN_PLAYER: {
-            if (player.job === 'ادمین') {
-                const targetId = message.targetId || message.target_id;
-                const duration = message.duration || 3600000;
-                const reason = message.reason || 'No reason provided';
-                const banEntry = {
-                    id: targetId,
-                    reason: reason,
-                    expires: duration === -1 ? null : Date.now() + duration
-                };
-                bans.push(banEntry);
-                fs.writeFileSync(banFilePath, JSON.stringify(bans));
+            const targetId = message.targetId || message.target_id;
+            if (!targetId) break;
 
-                const targetPlayer = players.get(targetId);
-                if (targetPlayer) {
-                    targetPlayer.send({
-                        type: PacketType.YOU_ARE_BANNED,
-                        message: `You are banned: ${reason}`
-                    });
-                    targetPlayer.close('Banned');
-                    players.delete(targetId);
-                    userMap.delete(targetId);
-                }
-                broadcast({ type: PacketType.BAN_LIST, bans: bans });
+            const duration = message.duration || 3600000; // پیش‌فرض ۱ ساعت
+            const reason = message.reason || 'No reason provided';
+
+            const banEntry = {
+                id: targetId,
+                reason: reason,
+                expires: duration === -1 ? null : Date.now() + duration
+            };
+            bans.push(banEntry);
+            fs.writeFileSync(banFilePath, JSON.stringify(bans));
+
+            const targetPlayer = players.get(targetId);
+            if (targetPlayer) {
+                targetPlayer.send({
+                    type: PacketType.YOU_ARE_BANNED,
+                    message: `You are banned: ${reason}`
+                });
+                targetPlayer.close('Banned');
+                players.delete(targetId);
+                userMap.delete(targetId);
             }
+
+            broadcast({ type: PacketType.BAN_LIST, bans: bans });
+            console.log(`[BAN] ${targetId} banned by ${player.id} | reason: ${reason}`);
             break;
         }
 
         case PacketType.UNBAN_PLAYER: {
-            if (player.job === 'ادمین') {
-                const targetId = message.targetId || message.target_id;
-                bans = bans.filter(b => b.id !== targetId);
-                fs.writeFileSync(banFilePath, JSON.stringify(bans));
-                broadcast({ type: PacketType.BAN_LIST, bans: bans });
-            }
+            const targetId = message.targetId || message.target_id;
+            if (!targetId) break;
+
+            bans = bans.filter(b => b.id !== targetId);
+            fs.writeFileSync(banFilePath, JSON.stringify(bans));
+            broadcast({ type: PacketType.BAN_LIST, bans: bans });
+            console.log(`[UNBAN] ${targetId} unbanned by ${player.id}`);
             break;
         }
 
         case PacketType.BAN_LIST: {
-            if (player.job === 'ادمین') {
-                player.send({ type: PacketType.BAN_LIST, bans: bans });
-            }
+            player.send({ type: PacketType.BAN_LIST, bans: bans });
             break;
         }
 
