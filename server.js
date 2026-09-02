@@ -317,8 +317,10 @@ function handleCreateVehicle(ws, client, data) {
       if (!Array.isArray(v.occupants)) v.occupants = [null, null, null, null, null];
       while (v.occupants.length < 5) v.occupants.push(null);
 
-      // اگر داخل هیچ صندلی نیست، بگذار راننده
+      // فقط اگه داخل هیچ ماشینی نیست، بذار راننده
       if (!v.occupants.includes(client.id)) {
+        // اول از همه ماشین‌ها بیرونش کن
+        removePlayerFromAllVehicles(client.id);
         v.occupants[0] = client.id;
       }
 
@@ -327,7 +329,7 @@ function handleCreateVehicle(ws, client, data) {
     }
   }
 
-  // ماشین جدید
+  // ماشین جدید فقط وقتی ساخته بشه که واقعاً مالکش نباشه
   const vid = genId();
   const vehicle = {
     id: vid,
@@ -505,12 +507,31 @@ function handleUnbanPlayer(ws, client, data) {
 function handleDisconnect(ws, client) {
   if (client.id) {
     players.delete(client.id);
-    removePlayerFromAllVehicles(client.id); // فقط از صندلی‌ها خارج می‌شود
+
+    // ماشین‌هایی که صاحبش این بازیکن بوده رو کامل پاک کن
+    const vehiclesToRemove = [];
+    for (const [vid, v] of vehicles) {
+      if (v.ownerId === client.id) {
+        vehiclesToRemove.push(vid);
+      }
+    }
+
+    for (const vid of vehiclesToRemove) {
+      vehicles.delete(vid);
+      broadcastToAll({ type: 'vehicle_removed', vehicleId: vid });
+      console.log(`🗑️ Vehicle ${vid} deleted because owner left`);
+    }
+
+    // از بقیه ماشین‌ها فقط بیرونش کن
+    removePlayerFromAllVehicles(client.id);
+
     broadcastToAll({ type: 'player_left', id: client.id });
-    // ماشین‌ها را broadcast کن تا بقیه ببینند صندلی خالی شده
+
+    // آپدیت صندلی ماشین‌های باقی‌مونده
     for (const [vid, v] of vehicles) {
       broadcastToAll({ type: 'seat_update', vehicleId: vid, occupants: v.occupants });
     }
+
     console.log(`👋 Left: ${client.name}`);
   }
   clients.delete(ws);
